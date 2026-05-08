@@ -7,7 +7,7 @@ import re
 import threading
 import time
 import os
-import tempfile
+import io
 from collections import deque
 from PIL import Image, ImageDraw, ImageFont
 
@@ -16,6 +16,7 @@ from AppKit import (
     NSAttributedString,
     NSForegroundColorAttributeName, NSFontAttributeName,
     NSFont, NSMenuItem,
+    NSData,
 )
 from Foundation import NSRunLoop, NSRunLoopCommonModes
 
@@ -168,25 +169,36 @@ def get_ollama_api_info():
 class OllamaProcessTracker:
     def __init__(self):
         self._procs: dict[int, psutil.Process] = {}
+        self._last_scan_time = 0
 
     def update(self):
-        current_pids = set()
-        for p in psutil.process_iter(['pid', 'cmdline']):
-            try:
-                cmd = " ".join(p.info['cmdline'] or [])
-                if 'ollama' not in cmd.lower():
-                    continue
-                pid = p.pid
-                current_pids.add(pid)
-                if pid not in self._procs:
-                    proc = psutil.Process(pid)
-                    proc.cpu_percent()
-                    self._procs[pid] = proc
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        for pid in list(self._procs):
-            if pid not in current_pids:
-                del self._procs[pid]
+        now = time.time()
+        # 프로세스 목록 스캔은 5초에 한 번만 수행 (부하 경감)
+        if now - self._last_scan_time > 5:
+            self._last_scan_time = now
+            current_pids = set()
+            for p in psutil.process_iter(['pid', 'cmdline']):
+                try:
+                    cmd = " ".join(p.info['cmdline'] or [])
+                    if 'ollama' not in cmd.lower():
+                        continue
+                    pid = p.pid
+                    current_pids.add(pid)
+                    if pid not in self._procs:
+                        proc = psutil.Process(pid)
+                        proc.cpu_percent()
+                        self._procs[pid] = proc
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+            # 사라진 프로세스 정리
+            for pid in list(self._procs):
+                if pid not in current_pids:
+                    del self._procs[pid]
+        else:
+            # 스캔 사이에는 기존 프로세스 생존 여부만 가볍게 확인
+            for pid in list(self._procs):
+                if not self._procs[pid].is_running():
+                    del self._procs[pid]
 
     def stats(self):
         best, best_mem, total_cpu = None, 0, 0.0
@@ -210,9 +222,6 @@ class HistoryGraph:
     def __init__(self):
         self._cpu = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
         self._gpu = deque([0.0] * HISTORY_LEN, maxlen=HISTORY_LEN)
-        self._tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        self._tmp_path = self._tmp.name
-        self._tmp.close()
 
     def push(self, cpu, gpu):
         self._cpu.append(cpu)
@@ -266,9 +275,11 @@ class HistoryGraph:
                   fill=GPU_COLOR + (230,))
         d.text((pad + 80 + dot + 6, dot_y - 1), "GPU", font=font, fill=GPU_COLOR + (230,))
 
-        img.save(self._tmp_path, "PNG")
-
-        ns_img = NSImage.alloc().initWithContentsOfFile_(self._tmp_path)
+        # 메모리에서 NSImage 생성 (디스크 I/O 제거)
+        buffer = io.BytesIO()
+        img.save(buffer, format="PNG")
+        data = NSData.dataWithBytes_length_(buffer.getvalue(), len(buffer.getvalue()))
+        ns_img = NSImage.alloc().initWithData_(data)
         ns_img.setSize_(NSSize(GRAPH_W, GRAPH_H))
         return ns_img
 
@@ -319,6 +330,8 @@ class MonitorApp(rumps.App):
         self._lock = threading.Lock()
         self._tracker = OllamaProcessTracker()
         self._graph   = HistoryGraph()
+
+        self._stats_counter = 0
 
         # 그래프용 NSMenuItem (이미지 표시)
         self._graph_nsitem = NSMenuItem.alloc().init()
@@ -392,23 +405,35 @@ class MonitorApp(rumps.App):
             self._disk = disk
 
     def _collect_stats(self, _):
+        self._stats_counter += 1
+        
         cpu  = psutil.cpu_percent(interval=None)
         mem  = psutil.virtual_memory().percent
         gpu  = get_gpu_stats()
-        bat  = get_battery_stats()
         net  = get_network_stats()
-        self._tracker.update()
-        ol_proc = self._tracker.stats()
-        ol_api  = get_ollama_api_info()
+        
+        # Ollama 및 배터리는 3초에 한 번만 갱신 (네트워크/부하 경감)
+        if self._stats_counter % 3 == 0:
+            bat  = get_battery_stats()
+            self._tracker.update()
+            ol_proc = self._tracker.stats()
+            ol_api  = get_ollama_api_info()
+            
+            with self._lock:
+                self._bat         = bat
+                self._ollama_proc = ol_proc
+                self._ollama_api  = ol_api
+        else:
+            self._tracker.update() # 생존 확인은 매초 수행 (가벼움)
+            ol_proc = self._tracker.stats()
+            with self._lock:
+                self._ollama_proc = ol_proc
 
         with self._lock:
             self._cpu         = cpu
             self._mem         = mem
             self._gpu         = gpu
-            self._bat         = bat
             self._net         = net
-            self._ollama_proc = ol_proc
-            self._ollama_api  = ol_api
 
         self._graph.push(cpu, gpu["device"])
         ns_img = self._graph.render_nsimage()
