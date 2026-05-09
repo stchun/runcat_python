@@ -36,8 +36,8 @@ Current performance issues in `app.py` compared to the native RunCat application
 - [x] **Reduce Polling Frequency:** Increase the interval for non-critical stats like Disk and Ollama API.
 
 ### Phase 2: Structural Improvements
-- [ ] **Dynamic Animation Timer:** Adjust the timer interval itself based on system load, rather than running a high-frequency timer that checks conditions.
-- [ ] **Direct GPU Access:** Investigate using `PyObjC` to access `IOKit` frameworks directly for GPU metrics, avoiding `ioreg` subprocess calls.
+- [x] **Dynamic Animation Timer:** Adjust the timer interval itself based on system load, rather than running a high-frequency timer that checks conditions.
+- [x] **Direct GPU Access:** Investigate using `PyObjC` to access `IOKit` frameworks directly for GPU metrics, avoiding `ioreg` subprocess calls.
 
 ### Phase 3: Resource Management
 - [ ] **Thread Efficiency:** Consolidate background tasks to minimize context switching.
