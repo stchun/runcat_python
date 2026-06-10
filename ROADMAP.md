@@ -1,68 +1,65 @@
-# RunCat Improvement Roadmap
+# RunCat 개선 로드맵
 
-This document outlines the strategic roadmap for evolving **RunCat** from a basic macOS system monitor into a professional-grade, high-performance dashboard for Apple Silicon and AI (LLM) workflows.
-
----
-
-## 🎯 Vision
-To provide an effortless, aesthetically pleasing, and highly functional window into your Mac's vital signs, specifically optimized for developers working with local Large Language Models (LLMs).
+이 문서는 **RunCat**을 단순한 macOS 시스템 모니터링 도구에서 Apple Silicon 및 AI (LLM) 워크플로우를 위한 전문적인 고성능 대시보드로 진화시키기 위한 전략적 로드맵을 설명합니다.
 
 ---
 
-## 🚀 Roadmap Phases
-
-### Phase 1: User Empowerment & Customization (Short-term)
-*Goal: Transition from a "fixed" tool to a "configurable" user experience.*
-
-#### 🎨 UX/UI Improvements
-- [ ] **Configuration Menu:** Add an "Options" menu item to toggle specific metrics (e.g., hide Network, Show Battery).
-- [ ] **Adaptive Themes:** Implement visual alerts (e.g., icon color changes from blue $\rightarrow$ orange $\rightarrow$ red) based on system load or temperature thresholds.
-- [ ] **Display Modes:** 
-    - `Compact Mode`: Only CPU & GPU in the menu bar.
-    - `Standard Mode`: Default view.
-    - `Advanced Mode`: Includes Network, Disk, and Ollama details.
-
-#### ⚙️ Technical Foundations
-- [ ] **Robust Error Handling:** Replace generic `try-except: pass` blocks with specific error logging and user notifications (e.g., "Ollama Connection Lost").
-- [ ] **Settings Persistence:** Save user preferences in a `.json` or `.plist` file so settings persist across restarts.
+## 🎯 비전
+Apple Silicon 환경에서 작업하는 개발자들을 위해, 특히 로컬 거대언어모델(LLM) 활용 유저들에게 최적화된, 심미적으로 뛰어나고 기능적인 Mac 상태 모니터링 창을 제공합니다.
 
 ---
 
-### Phase 2: Advanced Metrics & Ecosystem Expansion (Mid-term)
-*Goal: Deepen the depth of information provided and broaden the AI ecosystem support.*
+## 🚀 로드맵 단계
 
-#### 🌡️ System Hardware Insights
-- [ ] **Thermal Monitoring:** Integrate Apple Silicon thermal sensor data to display CPU/GPU temperatures.
-- [ ] **Process Drill-down:** A "Top Consumers" sub-menu showing the top 3 processes currently consuming most CPU or Memory.
+### Phase 1: 사용자 권한 부여 및 맞춤 설정 (단기 목표)
+*목표: "고정된" 도구에서 "설정 가능한" 사용자 경험으로 전환.*
 
-#### 🤖 AI Ecosystem Integration
-- [ ] **Multi-Engine Support:** Expand beyond `Ollama` to support:
-    - **LM Studio** (via local server API)
-    - **MLX** (direct monitoring of MLX runtime memory/compute)
-    - **Local Llama.cpp** instances
-- [ ] **VRAM Detailed Context:** Display more granular info about which layer or architecture is consuming VRAM when available.
+#### 🎨 UX/UI 개선
+- [ ] **설정 메뉴:** 특정 메트릭(예: 네트워크 숨기기, 배터리 표시 등)을 토글할 수 있는 '옵션' 메뉴 추가.
+- [ ] **적응형 테마:** 시스템 부하 또는 온도 임계값에 따라 아이콘 색상이 변경되는 시각적 경고 구현 (파랑 $\rightarrow$ 주황 $\rightarrow$ 빨강).
+- [ ] **디스플레이 모드:** 
+    - `Compact Mode`: 메뉴 바에는 CPU & GPU만 표시.
+    - `Standard Mode`: 기본 보기.
+    - `Advanced Mode`: 네트워크, 디스크 및 Ollama 상세 정보 포함.
 
----
-
-### Phase 3: Professional Analytics & Intelligence (Long-term)
-*Goal: Transform the tool from a "real-time observer" to an "analytical assistant."*
-
-#### 📊 Data & Analytics
-- [ ] **Session History:** Log system and AI workload metrics over time.
--   [ ] **Data Export:** Capability to export performance logs (CSV/JSON) for post-hoc analysis of heavy training or inference jobs.
-- [ ] **Weekly Summaries:** A "Summary Report" feature showing average CPU/GPU usage and peak LLM VRAM utilization for the week.
-
-#### 🧠 Intelligent Alerts
-- [ ] **Smart Notifications:** Instead of just numbers, provide actionable insights (e.g., *"Thermal Throttling detected: High GPU usage causing temperature spike"*).
-- [ ] **Predictive Monitoring:** (Advanced) Use lightweight trend estimation to warn users when a process is approaching resource exhaustion limits.
+#### ⚙️ 기술적 토대 구축
+- [ ] **강력한 에러 핸들링:** 일반적인 `try-except: pass` 블록을 구체적인 에러 로깅 및 사용자 알림(예: "Ollama 연결 끊김")으로 교체.
+- [ ] **설정 영속성:** 사용자가 설정한 환경이 재시작 후에도 유지되도록 `.json` 또는 `.plist` 파일에 저장 기능 구현.
 
 ---
 
-## 🛠 Implementation Guidelines
+### Phase 2: 고급 메트릭 및 생태계 확장 (중기 목표)
+*목표: 정보의 깊이를 더하고 AI 에코시스템 지원 범위를 넓힘.*
 
-*   **Performance First:** All monitoring tasks MUST remain in background threads via `threading` or `asyncio`. The main thread must only handle UI updates.
-*   **Low Overhead:** Monitor loops should be jitter-aware and use adaptive intervals to ensure the monitor itself doesn't cause significant CPU load.
-*   **Modular Design:** Use a plugin-based architecture for new metrics (e.g., `base_monitor.py` $\rightarrow$ `ollama_monitor.py`, `thermal_monitor.py`) to allow easy extension without refactoring the core app logic.
+#### 🌡️ 시스템 하드웨어 인사이트
+- [ ] **발열 모니터링:** Apple Silicon 열 센서 데이터를 통합하여 CPU/GPU 온도를 표시.
+- [ ] **프로세스 상세 보기:** 현재 CPU 또는 메모리를 가장 많이 사용하는 상위 3개 프로세스를 보여주는 "Top Consumers" 서브 메뉴.
+
+#### 🤖 AI 에코시스템 통합
+- [ ] **멀티 엔진 지원:** `Ollama`를 넘어 다음 엔진들로 확장:
+    - **LM Studio** (로컬 서버 API 활용)
+    - **MLX** (MLX 런타임 메모리/연산 직접 모니터링)
+    - **Local Llama.cpp** 인스턴스
+- [ ] **세밀한 VRAM 정보:** 가능한 경우 어떤 레이어나 아키텍처가 VRAM을 소비하고 있는지에 대한 더 상세한 정보 표시.
 
 ---
-*Last updated: June 09, 2026*
+
+### Phase 3: 전문 데이터 분석 및 지능형 모니터링 (장기 목표)
+*목표: "실시간 관찰 도구"에서 "분석 보조 도구"로 변모.*
+
+#### 📊 데이터 및 분석
+- [ ] **세션 히스토리:** 시스템 및 AI 워크로드 메트릭을 일정 기간 동안 기록.
+- [ ] **데이터 내보내기:** 사후 분석(heavy training 또는 추론 작업 분석용)을 위해 성능 로그를 CSV/JSON 파일로 내보내는 기능.
+- [ ] **주간 요약 리포트:** 주간 평균 CPU/GPU 사용량 및 피크 시간대 LLM VRAM 활용도를 보여주는 "요약 보고서" 기능.
+
+#### 🧠 지능형 알림
+- [ ] **스마트 알림:** 단순한 숫자가 아닌 행동 가능한 인사이트 제공 (예: *"발열 쓰로틀링 감지: 높은 GPU 사용으로 인해 온도가 급상승했습니다"*).
+- [ ] **예측 모니터링(고급):** 경량 추세 예측을 사용하여 리소스 고갈 임계값에 도달하기 전 사용자에게 경고.
+
+---
+
+## 🛠 구현 가이드라인
+
+* **성능 우선:** 모든 모니터링 작업은 반드시 `threading` 또는 `asyncio`를 통해 백그라운드 스레드에서 수행되어야 합니다. 메인 스레드는 UI 업데이트만 담당해야 합니다.
+* **저부하 설계:** 모니터링 루프는 지연 시간(jitter)을 고려하고 적응형 인터벌을 사용하여, 모니터링 도구 자체가 CPU 부하를 일으키지 않도록 해야 합니다.
+* **모듈형 디자인:** 새로운 메트릭을 쉽게 추가할 수 있도록 플러그인 기반 아키텍처 사용 (예: `base_monitor.py` $\rightarrow$ `ollama_monitor.py`, `thermal_monitor.py`). 이는 핵심 로직의 리팩토링 없이 확장을 가능하게 합니다.

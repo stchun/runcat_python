@@ -1,64 +1,64 @@
 # RunCat (Python)
 
-A high-performance, visual macOS Menu Bar system monitor optimized for Apple Silicon and AI workflows (Ollama). 
+Apple Silicon 및 AI 워크플로우(Ollama)에 최적화된 고성능 시각적 macOS 메뉴 바 시스템 모니터링 도구입니다.
 
-RunCat provides real-time insights into your Mac's vital signs through a sleek menu bar animation, providing an elegant way to keep track of resource consumption without cluttering your workspace.
+RunCat은 세련한 메뉴 바 애니메이션을 통해 Mac의 주요 상태를 실시간으로 제공합니다. 작업 공간을 어지럽히지 않으면서도 자원 소비 현황을 우아하게 확인할 수 있는 최적의 방법을 제공합니다.
 
-## ✨ Key Features
+## ✨ 주요 기능
 
-### 📊 Comprehensive System Monitoring
-* **CPU & Memory:** Real-time percentage tracking with dynamic progress bars.
-* **Apple Silicon GPU Support:** Deep integration via `IOKit` to monitor **Renderer** and **Tiler** utilization (AGX Accelerator), specifically for M1/M2/M3 chips.
-* **Network Traffic:** Real-time upload/download speeds (KB/s, MB/s) per interface.
-* **Disk Usage:** Real-time monitoring of used vs. total capacity.
-* **Battery Status:** Monitoring charge percentage and remaining time.
+### 📊 포괄적인 시스템 모니터링
+* **CPU 및 메모리:** 동적 프로그레스 바를 통한 실시간 백분율 추적.
+* **Apple Silicon GPU 지원:** `IOKit`을 활용한 깊은 통합으로 **Renderer** 및 **Tiler** 점유율(AGX 가속기) 모니터링 (M1/M2/M3 칩셋 전용).
+* **네트워크 트래픽:** 인터페이스별 실시간 업로드/다운로드 속도 (KB/s, MB/s).
+* **디스크 사용량:** 사용 중인 용량 및 전체 용량의 실시간 모니터링.
+* **배터리 상태:** 충전 백분율 및 남은 시간 모니터링.
 
-### 🤖 AI Workload Integration (Ollama Special)
-Uniquely designed for modern AI developers, RunCat can track your active Ollama session:
-* **Model Tracking:** Detects the current running LLM via Ollama API.
-* **VRAM & Context Info:** Displays specific model VRAM footprint and context window length in the menu bar.
-* **AI Resource Isolation:** Specifically monitors CPU and Memory usage specifically belonging to `ollama` processes.
+### 🤖 AI 워크로드 통합 (Ollama 특화 기능)
+현대적인 AI 개발자를 위해 설계된 RunCat은 현재 실행 중인 Ollama 세션을 추적할 수 있습니다.
+* **모델 추적:** Ollama API를 통해 현재 실행 중인 LLM을 감지합니다.
+* **VRAM 및 컨텍스트 정보:** 메뉴 바에 특정 모델의 VRAM 점유율과 컨텍스트 윈도우(Context Window) 길이를 표시합니다.
+* **AI 리소스 격리:** `ollama` 프로세스에 할당된 CPU 및 메모리 사용량을 별도로 모니터링합니다.
 
-### 🎨 Advanced Visual Experience
-* **Animated Menu Bar Icon:** The icon animates dynamically based on system load.
-* **Real-time Performance Graph:** A custom-rendered Sparkline graph (CPU/GPU history) is injected directly into the macOS menu when opened.
-* **Adaptive UI:** Interface intervals adjust automatically based on system activity to balance detail and power efficiency.
+### 🎨 고급 시각적 경험
+* **애니메이션 메뉴 바 아이콘:** 시스템 부하에 따라 아이콘이 역동적으로 움직입니다.
+* **실시간 성능 그래프:** 메뉴를 열었을 때 CPU/GPU 히스토리를 보여주는 커스텀 렌더링 스파크라인(Sparkline) 그래프가 삽입됩니다.
+* **적응형 UI:** 시스템 활동에 따라 인터페이스 업데이트 간격이 자동으로 조절되어 디테일과 전력 효율 사이의 균형을 맞춥니다.
 
-## 🛠 Tech Stack
+## 🛠 기술 스택
 
-* **GUI Framework:** `rumps` (macOS Menu Bar management).
-* **Data Collection:** `psutil` (System metrics), `ctypes` & `pyobjc` (Low-level macOS IOKit/CoreFoundation access).
-* **Graphics Engine:** `Pillow` (Dynamic graph rendering via `NSImage`).
-* **Language:** Python 3.14+
+* **GUI 프레임워크:** `rumps` (macOS 메뉴 바 관리).
+* **데이터 수집:** `psutil` (시스템 메트릭), `ctypes` & `pyobjc` (저수준 macOS IOKit/CoreFoundation 접근).
+* **그래픽 엔진:** `Pillow` (NSImage를 통한 동적 그래프 렌더링).
+* **언어:** Python 3.14+
 
-## 🚀 Requirements & Installation
+## 🚀 요구 사항 및 설치 방법
 
-### Prerequisites
-* macOS (Optimized for Apple Silicon)
-* Python 3.14+
+### 전제 조건
+* macOS (Apple Silicon 최적화)
+* Python 3.14 이상
 
-### Installation
+### 설치 단계
 
-1. **Clone the repository** (or navigate to the directory):
+1. **저장소 클론 또는 디렉토리 이동**:
    ```bash
-   cd /Users/baram/Project/run_cat
+   cd /Users/user01/Project/run_cat
    ```
 
-2. **Set up a virtual environment**:
+2. **가상 환경 설정**:
    ```bash
    python -m venv .venv
    source .venv/bin/activate
    ```
 
-3. **Install dependencies**:
+3. **의존성 설치**:
    ```bash
    pip install rumps psutil Pillow pyobjc-framework-AppKit pyobjc-framework-Foundation
    ```
 
-4. **Run the application**:
+4.  **애플리케이션 실행**:
    ```bash
    python app.py
    ```
 
-## 📝 License
-This project is provided as-is for personal use and monitoring optimization.
+## 📝 라이선스
+본 프로젝트는 개인적 사용을 위해 "있는 그대로(as-is)" 제공됩니다.
