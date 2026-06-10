@@ -1,0 +1,6 @@
+rumps
+psutil
+Pillow
+pyobjc
+setuptools
+pyinstaller

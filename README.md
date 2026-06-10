@@ -52,7 +52,7 @@ RunCat은 세련한 메뉴 바 애니메이션을 통해 Mac의 주요 상태를
 
 3. **의존성 설치**:
    ```bash
-   pip install rumps psutil Pillow pyobjc-framework-AppKit pyobjc-framework-Foundation
+   pip install -r requirements.txt
    ```
 
 4.  **애플리케이션 실행**:
