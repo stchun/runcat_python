@@ -58,6 +58,63 @@ cf.CFRelease.argtypes = [ctypes.c_void_p]
 
 _key_perf_stats = cf.CFStringCreateWithCString(None, b"PerformanceStatistics", 0)
 
+# ── IOHIDEventSystem Thermal Setup (Apple Silicon) ─────────────────
+iokit.IOHIDEventSystemClientCreate.restype = ctypes.c_void_p
+iokit.IOHIDEventSystemClientCreate.argtypes = [ctypes.c_void_p]
+iokit.IOHIDEventSystemClientCopyServices.restype = ctypes.c_void_p
+iokit.IOHIDEventSystemClientCopyServices.argtypes = [ctypes.c_void_p]
+iokit.IOHIDServiceClientCopyProperty.restype = ctypes.c_void_p
+iokit.IOHIDServiceClientCopyProperty.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+iokit.IOHIDServiceClientCopyEvent.restype = ctypes.c_void_p
+iokit.IOHIDServiceClientCopyEvent.argtypes = [ctypes.c_void_p, ctypes.c_int64, ctypes.c_int32, ctypes.c_int64]
+iokit.IOHIDEventGetFloatValue.restype = ctypes.c_double
+iokit.IOHIDEventGetFloatValue.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+cf.CFStringGetCString.restype = ctypes.c_bool
+cf.CFStringGetCString.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_long, ctypes.c_uint32]
+
+_HIDEVT_TEMPERATURE = 15
+_HIDEVT_TEMP_FIELD  = (_HIDEVT_TEMPERATURE << 16) | 0
+_hid_product_key = cf.CFStringCreateWithCString(None, b"Product", 0)
+_hid_client = iokit.IOHIDEventSystemClientCreate(None)
+
+def _hid_temp(svc_ptr) -> float:
+    evt = iokit.IOHIDServiceClientCopyEvent(svc_ptr, _HIDEVT_TEMPERATURE, 0, 0)
+    if not evt:
+        return None
+    val = iokit.IOHIDEventGetFloatValue(evt, _HIDEVT_TEMP_FIELD)
+    cf.CFRelease(evt)
+    return val if 0 < val < 150 else None
+
+def get_thermal_stats() -> dict:
+    try:
+        svc_ptr_arr = iokit.IOHIDEventSystemClientCopyServices(_hid_client)
+        if not svc_ptr_arr:
+            return {"cpu_temp": 0.0, "gpu_temp": 0.0}
+        svcs = objc.objc_object(c_void_p=svc_ptr_arr)
+        buf = ctypes.create_string_buffer(64)
+        tdie_vals, tdev_vals = [], []
+        for svc in svcs:
+            svc_ptr = ctypes.c_void_p(objc.pyobjc_id(svc))
+            name_ptr = iokit.IOHIDServiceClientCopyProperty(svc_ptr, _hid_product_key)
+            if not name_ptr:
+                continue
+            cf.CFStringGetCString(name_ptr, buf, 64, 0x08000100)
+            name = buf.value.decode("utf-8", errors="ignore")
+            cf.CFRelease(name_ptr)
+            t = _hid_temp(svc_ptr)
+            if t is None:
+                continue
+            if "tdie" in name:
+                tdie_vals.append(t)
+            elif "tdev" in name:
+                tdev_vals.append(t)
+        cf.CFRelease(svc_ptr_arr)
+        cpu_t = max(tdie_vals) if tdie_vals else 0.0
+        gpu_t = max(tdev_vals) if tdev_vals else 0.0
+        return {"cpu_temp": cpu_t, "gpu_temp": gpu_t}
+    except Exception:
+        return {"cpu_temp": 0.0, "gpu_temp": 0.0}
+
 
 def animation_interval(load_pct):
     if load_pct >= 80:   return 0.03
@@ -265,6 +322,7 @@ class MonitorApp(rumps.App):
         self._disk = {"used_gb": 0.0, "total_gb": 0.0, "pct": 0.0}
         self._net  = {"up_kb": 0.0, "down_kb": 0.0, "iface": ""}
         self._bat, self._ollama_proc, self._ollama_api = None, None, None
+        self._thermal = {"cpu_temp": 0.0, "gpu_temp": 0.0}
         self._lock = threading.Lock()
         self._tracker, self._graph = OllamaProcessTracker(), HistoryGraph()
         self._menu_open = False
@@ -376,11 +434,12 @@ class MonitorApp(rumps.App):
             ol_proc = self._tracker.stats()
             
             # 2. Medium frequency stats (every 3s or 6s)
-            bat, ol_api = None, None
+            bat, ol_api, thermal = None, None, None
             ollama_freq = 3 if plugged else 6
             if counter % ollama_freq == 0:
                 bat = get_battery_stats()
                 ol_api = get_ollama_api_info()
+                thermal = get_thermal_stats()
             
             # 3. Low frequency stats (every 30s)
             disk = None
@@ -392,6 +451,7 @@ class MonitorApp(rumps.App):
                 self._ollama_proc = ol_proc
                 if bat is not None: self._bat = bat
                 if ol_api is not None: self._ollama_api = ol_api
+                if thermal is not None: self._thermal = thermal
                 if disk is not None: self._disk = disk
                 self._graph.push(cpu, gpu["device"])
                 self._needs_update = True
@@ -405,10 +465,13 @@ class MonitorApp(rumps.App):
         self._update_menu()
 
     def _update_menu(self):
-        with self._lock: cpu, mem, gpu, disk, bat, net, ol_proc, ol_api = self._cpu, self._mem, self._gpu, self._disk, self._bat, self._net, self._ollama_proc, self._ollama_api
+        with self._lock: cpu, mem, gpu, disk, bat, net, ol_proc, ol_api, thermal = self._cpu, self._mem, self._gpu, self._disk, self._bat, self._net, self._ollama_proc, self._ollama_api, self._thermal
         LBL = 9
-        set_title(self._item_cpu, f"{'CPU':<{LBL}}{make_bar(cpu)}  {cpu:.1f}%", bold=True, mono=True)
-        set_title(self._item_gpu, f"{'GPU':<{LBL}}{make_bar(gpu.get('device', 0))}  {gpu.get('device', 0)}%", bold=True, mono=True)
+        cpu_t, gpu_t = thermal.get("cpu_temp", 0.0), thermal.get("gpu_temp", 0.0)
+        cpu_t_str = f"  {cpu_t:.0f}°C" if cpu_t > 0 else ""
+        gpu_t_str = f"  {gpu_t:.0f}°C" if gpu_t > 0 else ""
+        set_title(self._item_cpu, f"{'CPU':<{LBL}}{make_bar(cpu)}  {cpu:.1f}%{cpu_t_str}", bold=True, mono=True)
+        set_title(self._item_gpu, f"{'GPU':<{LBL}}{make_bar(gpu.get('device', 0))}  {gpu.get('device', 0)}%{gpu_t_str}", bold=True, mono=True)
         set_title(self._item_gpu_sub, f"  Renderer {gpu.get('renderer', 0)}%   Tiler {gpu.get('tiler', 0)}%", font_size=11, sub=True)
         set_title(self._item_mem, f"{'Memory':<{LBL}}{make_bar(mem)}  {mem:.1f}%", bold=True, mono=True)
         set_title(self._item_disk, f"{'Disk':<{LBL}}{make_bar(disk.get('pct', 0))}  {disk.get('pct', 0):.1f}%", bold=True, mono=True)
