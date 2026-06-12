@@ -109,8 +109,9 @@ def get_thermal_stats() -> dict:
             elif "tdev" in name:
                 tdev_vals.append(t)
         cf.CFRelease(svc_ptr_arr)
-        cpu_t = max(tdie_vals) if tdie_vals else 0.0
-        gpu_t = max(tdev_vals) if tdev_vals else 0.0
+        # tdev = CPU die clusters, tdie = GPU die (confirmed vs macmon)
+        cpu_t = max(tdev_vals) if tdev_vals else 0.0
+        gpu_t = max(tdie_vals) if tdie_vals else 0.0
         return {"cpu_temp": cpu_t, "gpu_temp": gpu_t}
     except Exception:
         return {"cpu_temp": 0.0, "gpu_temp": 0.0}
@@ -307,6 +308,41 @@ def set_title(item, title, bold=False, font_size=13, sub=False, mono=False):
     item._menuitem.setAttributedTitle_(_make_astr(title, bold, font_size, not sub, mono))
 
 
+def _threshold_color(val: float, warn: float, crit: float):
+    """val이 crit 이상이면 빨강, warn 이상이면 주황, 미만이면 None(기본색)."""
+    from AppKit import NSColor
+    if val >= crit:
+        return NSColor.colorWithRed_green_blue_alpha_(0.9, 0.1, 0.1, 1.0)
+    if val >= warn:
+        return NSColor.colorWithRed_green_blue_alpha_(0.95, 0.5, 0.0, 1.0)
+    return None
+
+
+def _temp_color(temp: float):
+    return _threshold_color(temp, warn=70, crit=85)
+
+
+def _usage_color(pct: float):
+    return _threshold_color(pct, warn=70, crit=85)
+
+
+def set_title_segments(item, segments, bold=False, font_size=13, mono=False):
+    """segments: list of (text, color_or_None). 각 구간에 독립적인 색상 적용."""
+    from AppKit import NSMutableAttributedString
+    result = NSMutableAttributedString.alloc().initWithString_attributes_("", {})
+    for text, color in segments:
+        if not text:
+            continue
+        astr = _make_astr(text, bold, font_size, dark=True, mono=mono)
+        if color:
+            mut = NSMutableAttributedString.alloc().initWithAttributedString_(astr)
+            mut.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(text)))
+            result.appendAttributedString_(mut)
+        else:
+            result.appendAttributedString_(astr)
+    item._menuitem.setAttributedTitle_(result)
+
+
 def make_bar(pct, width=8):
     filled = round(min(pct, 100) / 100 * width)
     return "█" * filled + "░" * (width - filled)
@@ -470,14 +506,39 @@ class MonitorApp(rumps.App):
         cpu_t, gpu_t = thermal.get("cpu_temp", 0.0), thermal.get("gpu_temp", 0.0)
         cpu_t_str = f"  {cpu_t:.0f}°C" if cpu_t > 0 else ""
         gpu_t_str = f"  {gpu_t:.0f}°C" if gpu_t > 0 else ""
-        set_title(self._item_cpu, f"{'CPU':<{LBL}}{make_bar(cpu)}  {cpu:.1f}%{cpu_t_str}", bold=True, mono=True)
-        set_title(self._item_gpu, f"{'GPU':<{LBL}}{make_bar(gpu.get('device', 0))}  {gpu.get('device', 0)}%{gpu_t_str}", bold=True, mono=True)
+        gpu_dev = gpu.get('device', 0)
+        disk_pct = disk.get('pct', 0)
+        set_title_segments(self._item_cpu, [
+            (f"{'CPU':<{LBL}}{make_bar(cpu)}  ", None),
+            (f"{cpu:.1f}%", _usage_color(cpu)),
+            (cpu_t_str, _temp_color(cpu_t)),
+        ], bold=True, mono=True)
+        set_title_segments(self._item_gpu, [
+            (f"{'GPU':<{LBL}}{make_bar(gpu_dev)}  ", None),
+            (f"{gpu_dev}%", _usage_color(gpu_dev)),
+            (gpu_t_str, _temp_color(gpu_t)),
+        ], bold=True, mono=True)
         set_title(self._item_gpu_sub, f"  Renderer {gpu.get('renderer', 0)}%   Tiler {gpu.get('tiler', 0)}%", font_size=11, sub=True)
-        set_title(self._item_mem, f"{'Memory':<{LBL}}{make_bar(mem)}  {mem:.1f}%", bold=True, mono=True)
-        set_title(self._item_disk, f"{'Disk':<{LBL}}{make_bar(disk.get('pct', 0))}  {disk.get('pct', 0):.1f}%", bold=True, mono=True)
+        set_title_segments(self._item_mem, [
+            (f"{'Memory':<{LBL}}{make_bar(mem)}  ", None),
+            (f"{mem:.1f}%", _usage_color(mem)),
+        ], bold=True, mono=True)
+        set_title_segments(self._item_disk, [
+            (f"{'Disk':<{LBL}}{make_bar(disk_pct)}  ", None),
+            (f"{disk_pct:.1f}%", _usage_color(disk_pct)),
+        ], bold=True, mono=True)
         set_title(self._item_disk_sub, f"  {disk.get('used_gb', 0.0):.1f} GB / {disk.get('total_gb', 0.0):.1f} GB 사용 중", font_size=11, sub=True)
         if bat:
-            set_title(self._item_bat, f"{'Battery':<{LBL}}{make_bar(bat['pct'])}  {'⚡ ' if bat['plugged'] else ''}{bat['pct']:.0f}%", bold=True, mono=True)
+            bat_pct = bat['pct']
+            if bat['plugged']:
+                from AppKit import NSColor
+                bat_color = NSColor.colorWithRed_green_blue_alpha_(0.1, 0.75, 0.2, 1.0) if bat_pct >= 80 else None
+            else:
+                bat_color = _threshold_color(100 - bat_pct, warn=80, crit=90)
+            set_title_segments(self._item_bat, [
+                (f"{'Battery':<{LBL}}{make_bar(bat_pct)}  {'⚡ ' if bat['plugged'] else ''}", None),
+                (f"{bat_pct:.0f}%", bat_color),
+            ], bold=True, mono=True)
             set_title(self._item_bat_sub, f"  {bat['remain']}", font_size=11, sub=True)
         else: set_title(self._item_bat, f"{'Battery':<{LBL}}N/A", bold=True, mono=True)
         def fmt_kb(kb): return f"{kb/1024:.1f} MB/s" if kb >= 1024 else f"{kb:.0f} KB/s"
