@@ -78,27 +78,32 @@ _libc.mach_task_self.restype = ctypes.c_uint
 _libc.mach_task_self.argtypes = []
 
 class _SMCParamStruct(ctypes.Structure):
-    _pack_ = 1
+    # C struct 자연 정렬 기준 80바이트:
+    #   vers(6B) → _pad0(2B) → pLimitData(16B) → keyInfo(9B) → _pad1(3B, keyInfo trailing)
+    #   → result/status/data8(3B) → _pad2(1B) → data32(4B) → bytes(32B)
     _fields_ = [
-        ('key',                    ctypes.c_uint32),
-        ('vers_major',             ctypes.c_uint8),
-        ('vers_minor',             ctypes.c_uint8),
-        ('vers_build',             ctypes.c_uint8),
-        ('vers_reserved',          ctypes.c_uint8),
-        ('vers_release',           ctypes.c_uint16),
-        ('pLimit_version',         ctypes.c_uint16),
-        ('pLimit_length',          ctypes.c_uint16),
-        ('pLimit_cpuPLimit',       ctypes.c_uint32),
-        ('pLimit_gpuPLimit',       ctypes.c_uint32),
-        ('pLimit_memPLimit',       ctypes.c_uint32),
-        ('keyInfo_dataSize',       ctypes.c_uint32),
-        ('keyInfo_dataType',       ctypes.c_uint32),
-        ('keyInfo_dataAttributes', ctypes.c_uint8),
-        ('result',                 ctypes.c_uint8),
-        ('status',                 ctypes.c_uint8),
-        ('data8',                  ctypes.c_uint8),
-        ('data32',                 ctypes.c_uint32),
-        ('bytes',                  ctypes.c_uint8 * 32),
+        ('key',                    ctypes.c_uint32),    # 0
+        ('vers_major',             ctypes.c_uint8),     # 4
+        ('vers_minor',             ctypes.c_uint8),     # 5
+        ('vers_build',             ctypes.c_uint8),     # 6
+        ('vers_reserved',          ctypes.c_uint8),     # 7
+        ('vers_release',           ctypes.c_uint16),    # 8
+        ('_pad0',                  ctypes.c_uint8 * 2), # 10 (pLimitData 4B 정렬)
+        ('pLimit_version',         ctypes.c_uint16),    # 12
+        ('pLimit_length',          ctypes.c_uint16),    # 14
+        ('pLimit_cpuPLimit',       ctypes.c_uint32),    # 16
+        ('pLimit_gpuPLimit',       ctypes.c_uint32),    # 20
+        ('pLimit_memPLimit',       ctypes.c_uint32),    # 24
+        ('keyInfo_dataSize',       ctypes.c_uint32),    # 28
+        ('keyInfo_dataType',       ctypes.c_uint32),    # 32
+        ('keyInfo_dataAttributes', ctypes.c_uint8),     # 36
+        ('_pad1',                  ctypes.c_uint8 * 3), # 37 (keyInfo struct trailing padding)
+        ('result',                 ctypes.c_uint8),     # 40
+        ('status',                 ctypes.c_uint8),     # 41
+        ('data8',                  ctypes.c_uint8),     # 42
+        ('_pad2',                  ctypes.c_uint8),     # 43 (data32 4B 정렬)
+        ('data32',                 ctypes.c_uint32),    # 44
+        ('bytes',                  ctypes.c_uint8 * 32),# 48
     ]
 
 _kSMCGetKeyInfo = 9
@@ -142,9 +147,9 @@ def _smc_read_key(conn: int, key: str) -> tuple[bytes | None, int | None]:
         return None, None
     return bytes(out2.bytes[:out.keyInfo_dataSize]), out.keyInfo_dataType
 
-def _fpe2(raw: bytes) -> float:
-    """fpe2 fixed-point: big-endian uint16 / 4."""
-    return _struct.unpack(">H", raw[:2])[0] / 4.0
+def _smc_float(raw: bytes) -> float:
+    """Apple Silicon SMC fan value: little-endian IEEE 754 float (flt , 4B)."""
+    return _struct.unpack("<f", raw[:4])[0]
 
 def get_fan_stats() -> list[dict]:
     """SMC에서 팬 RPM 읽기. 팬 없는 기기는 빈 리스트 반환."""
@@ -161,8 +166,8 @@ def get_fan_stats() -> list[dict]:
             for i in range(num_fans):
                 ac_raw, _ = _smc_read_key(conn, f"F{i}Ac")
                 mx_raw, _ = _smc_read_key(conn, f"F{i}Mx")
-                rpm     = _fpe2(ac_raw) if ac_raw else 0.0
-                max_rpm = _fpe2(mx_raw) if mx_raw else 6000.0
+                rpm     = _smc_float(ac_raw) if ac_raw and len(ac_raw) >= 4 else 0.0
+                max_rpm = _smc_float(mx_raw) if mx_raw and len(mx_raw) >= 4 else 6000.0
                 fans.append({"rpm": rpm, "max_rpm": max_rpm})
             return fans
         finally:
