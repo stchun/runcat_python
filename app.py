@@ -472,10 +472,12 @@ class MonitorApp(rumps.App):
             # 2. Medium frequency stats (every 3s or 6s)
             bat, ol_api, thermal = None, None, None
             ollama_freq = 3 if plugged else 6
+            _ollama_checked = False
             if counter % ollama_freq == 0:
                 bat = get_battery_stats()
                 ol_api = get_ollama_api_info()
                 thermal = get_thermal_stats()
+                _ollama_checked = True
             
             # 3. Low frequency stats (every 30s)
             disk = None
@@ -486,7 +488,7 @@ class MonitorApp(rumps.App):
                 self._cpu, self._mem, self._gpu, self._net = cpu, mem, gpu, net
                 self._ollama_proc = ol_proc
                 if bat is not None: self._bat = bat
-                if ol_api is not None: self._ollama_api = ol_api
+                if _ollama_checked: self._ollama_api = ol_api
                 if thermal is not None: self._thermal = thermal
                 if disk is not None: self._disk = disk
                 self._graph.push(cpu, gpu["device"])
@@ -546,8 +548,12 @@ class MonitorApp(rumps.App):
         if ol_api:
             set_title(self._item_ol_model, f"Ollama  {ol_api['name']}  (ctx {ol_api['context']:,})", bold=True)
             set_title(self._item_ol_vram, f"  VRAM {ol_api['vram_gb']:.1f} GB  /  Model {ol_api['size_gb']:.1f} GB", font_size=11, sub=True)
-        else: set_title(self._item_ol_model, "Ollama: not running", sub=True)
-        if ol_proc: set_title(self._item_ol_cpu, f"  CPU {ol_proc['total_cpu']:.1f}%   MEM {ol_proc['mem_mb']:.0f} MB", font_size=11, sub=True)
+        else:
+            set_title(self._item_ol_model, "Ollama: 로드된 모델 없음", sub=True)
+            set_title(self._item_ol_vram, "", font_size=11, sub=True)
+            set_title(self._item_ol_cpu, "", font_size=11, sub=True)
+        if ol_api and ol_proc:
+            set_title(self._item_ol_cpu, f"  CPU {ol_proc['total_cpu']:.1f}%   MEM {ol_proc['mem_mb']:.0f} MB", font_size=11, sub=True)
 
     def quit_app(self, _): rumps.quit_application()
 
