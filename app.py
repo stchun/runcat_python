@@ -447,7 +447,7 @@ class MonitorApp(rumps.App):
             ns_menu = self._item_cpu._menuitem.menu()
             if ns_menu:
                 idx = ns_menu.indexOfItem_(self._item_cpu._menuitem)
-                ns_menu.insertItem_atIndex_(self._graph_nsitem, idx + 1)
+                ns_menu.insertItem_atIndex_(self._graph_nsitem, idx)
                 self._graph_inserted = True
         except Exception: pass
 
