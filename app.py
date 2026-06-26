@@ -4,6 +4,7 @@ import subprocess
 import urllib.request
 import json
 import re
+import struct as _struct
 import threading
 import time
 import os
@@ -57,6 +58,117 @@ cf.CFRelease.restype = None
 cf.CFRelease.argtypes = [ctypes.c_void_p]
 
 _key_perf_stats = cf.CFStringCreateWithCString(None, b"PerformanceStatistics", 0)
+
+# ── SMC Fan Stats Setup ────────────────────────────────────────────
+iokit.IOServiceGetMatchingService.restype = ctypes.c_uint
+iokit.IOServiceGetMatchingService.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+iokit.IOServiceOpen.restype = ctypes.c_int
+iokit.IOServiceOpen.argtypes = [ctypes.c_uint, ctypes.c_uint, ctypes.c_uint, ctypes.POINTER(ctypes.c_uint)]
+iokit.IOServiceClose.restype = ctypes.c_int
+iokit.IOServiceClose.argtypes = [ctypes.c_uint]
+iokit.IOConnectCallStructMethod.restype = ctypes.c_int
+iokit.IOConnectCallStructMethod.argtypes = [
+    ctypes.c_uint, ctypes.c_uint32,
+    ctypes.c_void_p, ctypes.c_size_t,
+    ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+]
+
+_libc = ctypes.CDLL(ctypes.util.find_library("c"))
+_libc.mach_task_self.restype = ctypes.c_uint
+_libc.mach_task_self.argtypes = []
+
+class _SMCParamStruct(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ('key',                    ctypes.c_uint32),
+        ('vers_major',             ctypes.c_uint8),
+        ('vers_minor',             ctypes.c_uint8),
+        ('vers_build',             ctypes.c_uint8),
+        ('vers_reserved',          ctypes.c_uint8),
+        ('vers_release',           ctypes.c_uint16),
+        ('pLimit_version',         ctypes.c_uint16),
+        ('pLimit_length',          ctypes.c_uint16),
+        ('pLimit_cpuPLimit',       ctypes.c_uint32),
+        ('pLimit_gpuPLimit',       ctypes.c_uint32),
+        ('pLimit_memPLimit',       ctypes.c_uint32),
+        ('keyInfo_dataSize',       ctypes.c_uint32),
+        ('keyInfo_dataType',       ctypes.c_uint32),
+        ('keyInfo_dataAttributes', ctypes.c_uint8),
+        ('result',                 ctypes.c_uint8),
+        ('status',                 ctypes.c_uint8),
+        ('data8',                  ctypes.c_uint8),
+        ('data32',                 ctypes.c_uint32),
+        ('bytes',                  ctypes.c_uint8 * 32),
+    ]
+
+_kSMCGetKeyInfo = 9
+_kSMCReadKey    = 5
+
+def _smc_key_uint(s: str) -> int:
+    return _struct.unpack(">I", s.encode())[0]
+
+def _smc_open() -> int | None:
+    svc = iokit.IOServiceGetMatchingService(0, iokit.IOServiceMatching(b"AppleSMC"))
+    if not svc:
+        return None
+    conn = ctypes.c_uint()
+    ret = iokit.IOServiceOpen(svc, _libc.mach_task_self(), 0, ctypes.byref(conn))
+    iokit.IOObjectRelease(svc)
+    return conn.value if ret == 0 else None
+
+def _smc_call(conn: int, inp: _SMCParamStruct) -> _SMCParamStruct | None:
+    out = _SMCParamStruct()
+    out_size = ctypes.c_size_t(ctypes.sizeof(out))
+    ret = iokit.IOConnectCallStructMethod(
+        conn, 2,
+        ctypes.byref(inp), ctypes.sizeof(inp),
+        ctypes.byref(out), ctypes.byref(out_size),
+    )
+    return out if ret == 0 else None
+
+def _smc_read_key(conn: int, key: str) -> tuple[bytes | None, int | None]:
+    inp = _SMCParamStruct()
+    inp.key = _smc_key_uint(key)
+    inp.data8 = _kSMCGetKeyInfo
+    out = _smc_call(conn, inp)
+    if out is None:
+        return None, None
+    inp2 = _SMCParamStruct()
+    inp2.key = _smc_key_uint(key)
+    inp2.keyInfo_dataSize = out.keyInfo_dataSize
+    inp2.data8 = _kSMCReadKey
+    out2 = _smc_call(conn, inp2)
+    if out2 is None:
+        return None, None
+    return bytes(out2.bytes[:out.keyInfo_dataSize]), out.keyInfo_dataType
+
+def _fpe2(raw: bytes) -> float:
+    """fpe2 fixed-point: big-endian uint16 / 4."""
+    return _struct.unpack(">H", raw[:2])[0] / 4.0
+
+def get_fan_stats() -> list[dict]:
+    """SMC에서 팬 RPM 읽기. 팬 없는 기기는 빈 리스트 반환."""
+    try:
+        conn = _smc_open()
+        if conn is None:
+            return []
+        try:
+            num_raw, _ = _smc_read_key(conn, "FNum")
+            if num_raw is None:
+                return []
+            num_fans = num_raw[0]
+            fans = []
+            for i in range(num_fans):
+                ac_raw, _ = _smc_read_key(conn, f"F{i}Ac")
+                mx_raw, _ = _smc_read_key(conn, f"F{i}Mx")
+                rpm     = _fpe2(ac_raw) if ac_raw else 0.0
+                max_rpm = _fpe2(mx_raw) if mx_raw else 6000.0
+                fans.append({"rpm": rpm, "max_rpm": max_rpm})
+            return fans
+        finally:
+            iokit.IOServiceClose(conn)
+    except Exception:
+        return []
 
 # ── IOHIDEventSystem Thermal Setup (Apple Silicon) ─────────────────
 iokit.IOHIDEventSystemClientCreate.restype = ctypes.c_void_p
@@ -359,6 +471,7 @@ class MonitorApp(rumps.App):
         self._net  = {"up_kb": 0.0, "down_kb": 0.0, "iface": ""}
         self._bat, self._ollama_proc, self._ollama_api = None, None, None
         self._thermal = {"cpu_temp": 0.0, "gpu_temp": 0.0}
+        self._fan: list[dict] = []
         self._lock = threading.Lock()
         self._tracker, self._graph = OllamaProcessTracker(), HistoryGraph()
         self._menu_open = False
@@ -369,6 +482,7 @@ class MonitorApp(rumps.App):
         self._graph_inserted = False
 
         self._item_cpu, self._item_gpu, self._item_gpu_sub = rumps.MenuItem(""), rumps.MenuItem(""), rumps.MenuItem("")
+        self._item_fan = rumps.MenuItem("")
         self._item_mem, self._item_disk, self._item_disk_sub = rumps.MenuItem(""), rumps.MenuItem(""), rumps.MenuItem("")
         self._item_bat, self._item_bat_sub = rumps.MenuItem(""), rumps.MenuItem("")
         self._item_net, self._item_net_sub = rumps.MenuItem(""), rumps.MenuItem("")
@@ -376,6 +490,7 @@ class MonitorApp(rumps.App):
 
         self.menu = [
             self._item_cpu, self._item_gpu, self._item_gpu_sub, rumps.separator,
+            self._item_fan, rumps.separator,
             self._item_mem, rumps.separator, self._item_disk, self._item_disk_sub, rumps.separator,
             self._item_bat, self._item_bat_sub, rumps.separator, self._item_net, self._item_net_sub, rumps.separator,
             self._item_ol_model, self._item_ol_vram, self._item_ol_cpu, rumps.separator,
@@ -470,13 +585,14 @@ class MonitorApp(rumps.App):
             ol_proc = self._tracker.stats()
             
             # 2. Medium frequency stats (every 3s or 6s)
-            bat, ol_api, thermal = None, None, None
+            bat, ol_api, thermal, fan = None, None, None, None
             ollama_freq = 3 if plugged else 6
             _ollama_checked = False
             if counter % ollama_freq == 0:
                 bat = get_battery_stats()
                 ol_api = get_ollama_api_info()
                 thermal = get_thermal_stats()
+                fan = get_fan_stats()
                 _ollama_checked = True
             
             # 3. Low frequency stats (every 30s)
@@ -490,6 +606,7 @@ class MonitorApp(rumps.App):
                 if bat is not None: self._bat = bat
                 if _ollama_checked: self._ollama_api = ol_api
                 if thermal is not None: self._thermal = thermal
+                if fan is not None: self._fan = fan
                 if disk is not None: self._disk = disk
                 self._graph.push(cpu, gpu["device"])
                 self._needs_update = True
@@ -503,7 +620,7 @@ class MonitorApp(rumps.App):
         self._update_menu()
 
     def _update_menu(self):
-        with self._lock: cpu, mem, gpu, disk, bat, net, ol_proc, ol_api, thermal = self._cpu, self._mem, self._gpu, self._disk, self._bat, self._net, self._ollama_proc, self._ollama_api, self._thermal
+        with self._lock: cpu, mem, gpu, disk, bat, net, ol_proc, ol_api, thermal, fan = self._cpu, self._mem, self._gpu, self._disk, self._bat, self._net, self._ollama_proc, self._ollama_api, self._thermal, self._fan
         LBL = 9
         cpu_t, gpu_t = thermal.get("cpu_temp", 0.0), thermal.get("gpu_temp", 0.0)
         cpu_t_str = f"  {cpu_t:.0f}°C" if cpu_t > 0 else ""
@@ -521,6 +638,26 @@ class MonitorApp(rumps.App):
             (gpu_t_str, _temp_color(gpu_t)),
         ], bold=True, mono=True)
         set_title(self._item_gpu_sub, f"  Renderer {gpu.get('renderer', 0)}%   Tiler {gpu.get('tiler', 0)}%", font_size=11, sub=True)
+        if fan:
+            if len(fan) == 1:
+                rpm, max_rpm = fan[0]['rpm'], fan[0]['max_rpm']
+                pct = rpm / max_rpm * 100 if max_rpm > 0 else 0
+                set_title_segments(self._item_fan, [
+                    (f"{'Fan':<{LBL}}{make_bar(pct)}  ", None),
+                    (f"{rpm:.0f} RPM", _usage_color(pct)),
+                ], bold=True, mono=True)
+            else:
+                segs = [(f"{'Fan':<{LBL}}", None)]
+                for i, f in enumerate(fan):
+                    rpm, max_rpm = f['rpm'], f['max_rpm']
+                    pct = rpm / max_rpm * 100 if max_rpm > 0 else 0
+                    segs.append((f"F{i} {rpm:.0f}", _usage_color(pct)))
+                    if i < len(fan) - 1:
+                        segs.append((" / ", None))
+                segs.append((" RPM", None))
+                set_title_segments(self._item_fan, segs, bold=True, mono=True)
+        else:
+            set_title(self._item_fan, f"{'Fan':<{LBL}}팬 없음", bold=True, mono=True)
         set_title_segments(self._item_mem, [
             (f"{'Memory':<{LBL}}{make_bar(mem)}  ", None),
             (f"{mem:.1f}%", _usage_color(mem)),
