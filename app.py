@@ -690,12 +690,16 @@ class MonitorApp(rumps.App):
         if ol_api:
             set_title(self._item_ol_model, f"Ollama  {ol_api['name']}  (ctx {ol_api['context']:,})", bold=True)
             set_title(self._item_ol_vram, f"  VRAM {ol_api['vram_gb']:.1f} GB  /  Model {ol_api['size_gb']:.1f} GB", font_size=11, sub=True)
+            self._item_ol_vram.show()
         else:
             set_title(self._item_ol_model, "Ollama: 로드된 모델 없음", sub=True)
-            set_title(self._item_ol_vram, "", font_size=11, sub=True)
-            set_title(self._item_ol_cpu, "", font_size=11, sub=True)
+            self._item_ol_vram.hide()
+            self._item_ol_cpu.hide()
         if ol_api and ol_proc:
             set_title(self._item_ol_cpu, f"  CPU {ol_proc['total_cpu']:.1f}%   MEM {ol_proc['mem_mb']:.0f} MB", font_size=11, sub=True)
+            self._item_ol_cpu.show()
+        elif ol_api:
+            self._item_ol_cpu.hide()
 
     def quit_app(self, _): rumps.quit_application()
 
