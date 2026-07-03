@@ -290,16 +290,26 @@ def get_disk_stats():
     return {"used_gb": used_gb, "total_gb": total_gb, "pct": pct}
 
 
+def _get_charger_watts():
+    try:
+        out = subprocess.run(["system_profiler", "SPPowerDataType"], capture_output=True, text=True, timeout=3).stdout
+        m = re.search(r"AC Charger Information:.*?Wattage \(W\):\s*(\d+)", out, re.S)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
 def get_battery_stats():
     bat = psutil.sensors_battery()
     if bat is None: return None
     plugged, secs = bat.power_plugged, bat.secsleft
-    if plugged: remain = "충전 중"
+    watts = _get_charger_watts() if plugged else 0
+    if plugged: remain = f"충전 중: {watts}W" if watts > 0 else "충전 중"
     elif secs == psutil.POWER_TIME_UNLIMITED or secs < 0: remain = "--"
     else:
         h, m = divmod(secs // 60, 60)
         remain = f"{h}시간 {m}분 남음"
-    return {"pct": bat.percent, "plugged": plugged, "remain": remain}
+    return {"pct": bat.percent, "plugged": plugged, "remain": remain, "watts": watts}
 
 
 _net_prev, _net_prev_time = None, None
