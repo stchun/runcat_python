@@ -1,6 +1,7 @@
 .claude/
 .DS_Store
 .venv/
+.obsidian/
 __pycache__/
 *.pyc
 *.pyo
