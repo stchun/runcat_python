@@ -241,6 +241,9 @@ def animation_interval(load_pct):
     elif load_pct >= 20: return 0.25
     else:                return 0.5
 
+SCREEN_OFF_ANIMATION_INTERVAL = 5.0
+SCREEN_OFF_STATS_INTERVAL = 15.0
+
 
 def get_gpu_stats():
     matching = iokit.IOServiceMatching(b"AGXAccelerator")
@@ -491,6 +494,7 @@ class MonitorApp(rumps.App):
         self._tracker, self._graph = OllamaProcessTracker(), HistoryGraph()
         self._menu_open = False
         self._needs_update = False
+        self._screen_off = threading.Event()
 
         self._graph_nsitem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
         self._graph_nsitem.setEnabled_(False)
@@ -513,6 +517,7 @@ class MonitorApp(rumps.App):
         ]
 
         self._setup_menu_observers()
+        self._setup_power_observers()
         self._start_timer(self._animate, 0.1)
         
         # Start background stats collection
@@ -532,6 +537,26 @@ class MonitorApp(rumps.App):
     def _menu_did_close_(self, _):
         self._menu_open = False
 
+    def _setup_power_observers(self):
+        from AppKit import NSWorkspace
+        nc = NSWorkspace.sharedWorkspace().notificationCenter()
+        nc.addObserver_selector_name_object_(self, "_screens_did_sleep_", "NSWorkspaceScreensDidSleepNotification", None)
+        nc.addObserver_selector_name_object_(self, "_screens_did_wake_", "NSWorkspaceScreensDidWakeNotification", None)
+        nc.addObserver_selector_name_object_(self, "_will_sleep_", "NSWorkspaceWillSleepNotification", None)
+        nc.addObserver_selector_name_object_(self, "_did_wake_", "NSWorkspaceDidWakeNotification", None)
+
+    def _screens_did_sleep_(self, _):
+        self._screen_off.set()
+
+    def _will_sleep_(self, _):
+        self._screen_off.set()
+
+    def _screens_did_wake_(self, _):
+        self._screen_off.clear()
+
+    def _did_wake_(self, _):
+        self._screen_off.clear()
+
     def _start_timer(self, callback, interval):
         t = rumps.Timer(callback, interval)
         t.start()
@@ -550,10 +575,17 @@ class MonitorApp(rumps.App):
         except Exception: pass
 
     def _animate(self, timer):
+        if self._screen_off.is_set():
+            if abs(timer.interval - SCREEN_OFF_ANIMATION_INTERVAL) > 0.001:
+                timer.interval = SCREEN_OFF_ANIMATION_INTERVAL
+                try: NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSRunLoopCommonModes)
+                except Exception: pass
+            return
+
         with self._lock:
             cpu, gpu_pct = self._cpu, self._gpu["device"]
             plugged = self._bat["plugged"] if self._bat else True
-        
+
         base_interval = animation_interval(max(cpu, gpu_pct))
         new_interval = base_interval * (1.5 if not plugged and max(cpu, gpu_pct) < 20 else 1.0)
 
@@ -561,10 +593,10 @@ class MonitorApp(rumps.App):
             timer.interval = new_interval
             try: NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSRunLoopCommonModes)
             except Exception: pass
-        
+
         self._frame = (self._frame + 1) % len(FRAME_PATHS)
         self._set_icon(FRAME_PATHS[self._frame])
-        
+
         if self._menu_open:
             self._insert_graph()
             if self._needs_update:
@@ -589,7 +621,10 @@ class MonitorApp(rumps.App):
                 plugged = self._bat["plugged"] if self._bat else True
             
             # Adaptive interval
-            interval = 2.0 if not plugged else 1.0
+            if self._screen_off.is_set():
+                interval = SCREEN_OFF_STATS_INTERVAL
+            else:
+                interval = 2.0 if not plugged else 1.0
             
             # 1. High frequency stats
             cpu = psutil.cpu_percent(interval=None)
@@ -644,7 +679,7 @@ class MonitorApp(rumps.App):
         disk_pct = disk.get('pct', 0)
         set_title_segments(self._item_cpu, [
             (f"{'CPU':<{LBL}}{make_bar(cpu)}  ", None),
-            (f"{cpu:.1f}%", _usage_color(cpu)),
+            (f"{cpu:.0f}%", _usage_color(cpu)),
             (cpu_t_str, _temp_color(cpu_t)),
         ], bold=True, mono=True)
         set_title_segments(self._item_gpu, [
@@ -675,11 +710,11 @@ class MonitorApp(rumps.App):
             set_title(self._item_fan, f"{'Fan':<{LBL}}팬 없음", bold=True, mono=True)
         set_title_segments(self._item_mem, [
             (f"{'Memory':<{LBL}}{make_bar(mem)}  ", None),
-            (f"{mem:.1f}%", _usage_color(mem)),
+            (f"{mem:.0f}%", _usage_color(mem)),
         ], bold=True, mono=True)
         set_title_segments(self._item_disk, [
             (f"{'Disk':<{LBL}}{make_bar(disk_pct)}  ", None),
-            (f"{disk_pct:.1f}%", _usage_color(disk_pct)),
+            (f"{disk_pct:.0f}%", _usage_color(disk_pct)),
         ], bold=True, mono=True)
         set_title(self._item_disk_sub, f"  {disk.get('used_gb', 0.0):.1f} GB / {disk.get('total_gb', 0.0):.1f} GB 사용 중", font_size=11, sub=True)
         if bat:
