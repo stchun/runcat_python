@@ -344,11 +344,37 @@ def get_ollama_api_info():
         models = data.get("models", [])
         if not models: return None
         model = max(models, key=lambda m: m.get("size_vram", 0))
+        size, vram = model.get("size", 0), model.get("size_vram", 0)
         return {
             "name": model["name"],
-            "vram_gb": model.get("size_vram", 0) / 1024**3,
-            "size_gb": model.get("size", 0) / 1024**3,
+            "model": model.get("model") or model["name"],
+            "vram_gb": vram / 1024**3,
+            "size_gb": size / 1024**3,
             "context": model.get("context_length", 0),
+            "offload_pct": (vram / size * 100) if size > 0 else 0.0,
+        }
+    except Exception: return None
+
+
+def get_ollama_model_details(model: str):
+    """POST /api/show로 모델 아키텍처 메타데이터 조회. 모델당 1회만 호출할 것."""
+    try:
+        req = urllib.request.Request(
+            f"{OLLAMA_API}/api/show",
+            data=json.dumps({"model": model}).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        data = json.loads(urllib.request.urlopen(req, timeout=2).read())
+        info, details = data.get("model_info") or {}, data.get("details") or {}
+        arch = info.get("general.architecture", "")
+        params = info.get("general.parameter_count", 0)
+        if params: params_str = f"{params / 1e9:.1f}B"
+        else: params_str = details.get("parameter_size", "")
+        return {
+            "arch": arch or details.get("family", ""),
+            "layers": info.get(f"{arch}.block_count", 0),
+            "params": params_str,
+            "quant": details.get("quantization_level", ""),
         }
     except Exception: return None
 
@@ -392,6 +418,44 @@ class OllamaProcessTracker:
             except (psutil.NoSuchProcess, psutil.AccessDenied): del self._procs[pid]
         if best: best["total_cpu"] = total_cpu
         return best
+
+
+class TopProcessTracker:
+    """CPU/메모리 상위 소비 프로세스 추적. OllamaProcessTracker와 동일한 캐시 전략."""
+
+    def __init__(self, top_n=3):
+        self._procs: dict[int, tuple[psutil.Process, str]] = {}
+        self._last_scan_time = 0
+        self._top_n = top_n
+
+    def update(self):
+        now = time.time()
+        if now - self._last_scan_time <= 5:
+            return
+        self._last_scan_time = now
+        current_pids = set()
+        for p in psutil.process_iter(['pid']):
+            pid = p.pid
+            current_pids.add(pid)
+            if pid in self._procs: continue
+            try:
+                proc = psutil.Process(pid)
+                name = proc.name()
+                proc.cpu_percent()  # 델타 프라이밍
+                self._procs[pid] = (proc, name)
+            except (psutil.NoSuchProcess, psutil.AccessDenied): pass
+        for pid in list(self._procs):
+            if pid not in current_pids: del self._procs[pid]
+
+    def stats(self):
+        rows = []
+        for pid, (proc, name) in list(self._procs.items()):
+            try: rows.append((name, proc.cpu_percent(), proc.memory_info().rss / 1024**2))
+            except (psutil.NoSuchProcess, psutil.AccessDenied): del self._procs[pid]
+        return {
+            "cpu": [(n, c) for n, c, _ in sorted(rows, key=lambda r: r[1], reverse=True)[:self._top_n]],
+            "mem": [(n, m) for n, _, m in sorted(rows, key=lambda r: r[2], reverse=True)[:self._top_n]],
+        }
 
 
 class HistoryGraph:
@@ -490,8 +554,12 @@ class MonitorApp(rumps.App):
         self._bat, self._ollama_proc, self._ollama_api = None, None, None
         self._thermal = {"cpu_temp": 0.0, "gpu_temp": 0.0}
         self._fan: list[dict] = []
+        self._top = {"cpu": [], "mem": []}
+        self._ol_details = None
+        self._ol_details_cache: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._tracker, self._graph = OllamaProcessTracker(), HistoryGraph()
+        self._top_tracker = TopProcessTracker()
         self._menu_open = False
         self._needs_update = False
         self._screen_off = threading.Event()
@@ -506,13 +574,20 @@ class MonitorApp(rumps.App):
         self._item_bat, self._item_bat_sub = rumps.MenuItem(""), rumps.MenuItem("")
         self._item_net, self._item_net_sub = rumps.MenuItem(""), rumps.MenuItem("")
         self._item_ol_model, self._item_ol_vram, self._item_ol_cpu = rumps.MenuItem(""), rumps.MenuItem(""), rumps.MenuItem("")
+        self._item_ol_arch, self._item_ol_gpu = rumps.MenuItem(""), rumps.MenuItem("")
+        self._item_top_cpu_hdr, self._item_top_mem_hdr = rumps.MenuItem(""), rumps.MenuItem("")
+        self._items_top_cpu = [rumps.MenuItem("") for _ in range(3)]
+        self._items_top_mem = [rumps.MenuItem("") for _ in range(3)]
 
         self.menu = [
             self._item_cpu, self._item_gpu, self._item_gpu_sub, rumps.separator,
             self._item_fan, rumps.separator,
-            self._item_mem, rumps.separator, self._item_disk, self._item_disk_sub, rumps.separator,
+            self._item_mem, rumps.separator,
+            self._item_top_cpu_hdr, *self._items_top_cpu,
+            self._item_top_mem_hdr, *self._items_top_mem, rumps.separator,
+            self._item_disk, self._item_disk_sub, rumps.separator,
             self._item_bat, self._item_bat_sub, rumps.separator, self._item_net, self._item_net_sub, rumps.separator,
-            self._item_ol_model, self._item_ol_vram, self._item_ol_cpu, rumps.separator,
+            self._item_ol_model, self._item_ol_vram, self._item_ol_arch, self._item_ol_gpu, self._item_ol_cpu, rumps.separator,
             rumps.MenuItem("Quit", callback=self.quit_app),
         ]
 
@@ -635,7 +710,8 @@ class MonitorApp(rumps.App):
             ol_proc = self._tracker.stats()
             
             # 2. Medium frequency stats (every 3s or 6s)
-            bat, ol_api, thermal, fan = None, None, None, None
+            bat, ol_api, thermal, fan, top = None, None, None, None, None
+            ol_details = None
             ollama_freq = 3 if plugged else 6
             _ollama_checked = False
             if counter % ollama_freq == 0:
@@ -643,7 +719,15 @@ class MonitorApp(rumps.App):
                 ol_api = get_ollama_api_info()
                 thermal = get_thermal_stats()
                 fan = get_fan_stats()
+                self._top_tracker.update()
+                top = self._top_tracker.stats()
                 _ollama_checked = True
+                if ol_api:
+                    key = ol_api["model"]
+                    if key not in self._ol_details_cache:
+                        if len(self._ol_details_cache) >= 8: self._ol_details_cache.clear()
+                        self._ol_details_cache[key] = get_ollama_model_details(key) or {}
+                    ol_details = self._ol_details_cache[key] or None
             
             # 3. Low frequency stats (every 30s)
             disk = None
@@ -654,7 +738,10 @@ class MonitorApp(rumps.App):
                 self._cpu, self._mem, self._gpu, self._net = cpu, mem, gpu, net
                 self._ollama_proc = ol_proc
                 if bat is not None: self._bat = bat
-                if _ollama_checked: self._ollama_api = ol_api
+                if _ollama_checked:
+                    self._ollama_api = ol_api
+                    self._ol_details = ol_details
+                if top is not None: self._top = top
                 if thermal is not None: self._thermal = thermal
                 if fan is not None: self._fan = fan
                 if disk is not None: self._disk = disk
@@ -670,7 +757,9 @@ class MonitorApp(rumps.App):
         self._update_menu()
 
     def _update_menu(self):
-        with self._lock: cpu, mem, gpu, disk, bat, net, ol_proc, ol_api, thermal, fan = self._cpu, self._mem, self._gpu, self._disk, self._bat, self._net, self._ollama_proc, self._ollama_api, self._thermal, self._fan
+        with self._lock:
+            cpu, mem, gpu, disk, bat, net, ol_proc, ol_api, thermal, fan = self._cpu, self._mem, self._gpu, self._disk, self._bat, self._net, self._ollama_proc, self._ollama_api, self._thermal, self._fan
+            top, ol_details = self._top, self._ol_details
         LBL = 9
         cpu_t, gpu_t = thermal.get("cpu_temp", 0.0), thermal.get("gpu_temp", 0.0)
         cpu_t_str = f"  {cpu_t:.0f}°C" if cpu_t > 0 else ""
@@ -712,6 +801,23 @@ class MonitorApp(rumps.App):
             (f"{'Memory':<{LBL}}{make_bar(mem)}  ", None),
             (f"{mem:.0f}%", _usage_color(mem)),
         ], bold=True, mono=True)
+        set_title(self._item_top_cpu_hdr, "Top CPU", bold=True, mono=True)
+        set_title(self._item_top_mem_hdr, "Top MEM", bold=True, mono=True)
+        for i, item in enumerate(self._items_top_cpu):
+            rows = top.get("cpu", [])
+            if i >= len(rows): item.hide(); continue
+            name, val = rows[i]
+            set_title_segments(item, [
+                (f"  {i+1}. {name[:18]:<19}", None),
+                (f"{val:>6.1f}%", _usage_color(val)),
+            ], font_size=11, mono=True)
+            item.show()
+        for i, item in enumerate(self._items_top_mem):
+            rows = top.get("mem", [])
+            if i >= len(rows): item.hide(); continue
+            name, val = rows[i]
+            set_title(item, f"  {i+1}. {name[:18]:<19}{val:>6,.0f} MB", font_size=11, mono=True)
+            item.show()
         set_title_segments(self._item_disk, [
             (f"{'Disk':<{LBL}}{make_bar(disk_pct)}  ", None),
             (f"{disk_pct:.0f}%", _usage_color(disk_pct)),
@@ -733,12 +839,31 @@ class MonitorApp(rumps.App):
         def fmt_kb(kb): return f"{kb/1024:.1f} MB/s" if kb >= 1024 else f"{kb:.0f} KB/s"
         set_title(self._item_net, f"{'Network':<{LBL}}↑ {fmt_kb(net['up_kb'])}  ↓ {fmt_kb(net['down_kb'])}{' ('+net['iface']+')' if net['iface'] else ''}", bold=True, mono=True)
         if ol_api:
+            offload = ol_api.get('offload_pct', 0.0)
             set_title(self._item_ol_model, f"Ollama  {ol_api['name']}  (ctx {ol_api['context']:,})", bold=True)
-            set_title(self._item_ol_vram, f"  VRAM {ol_api['vram_gb']:.1f} GB  /  Model {ol_api['size_gb']:.1f} GB", font_size=11, sub=True)
+            set_title_segments(self._item_ol_vram, [
+                (f"  VRAM {ol_api['vram_gb']:.1f} GB  /  Model {ol_api['size_gb']:.1f} GB   ", None),
+                (f"(GPU {offload:.0f}%)", _threshold_color(100 - offload, warn=1, crit=50)),
+            ], font_size=11, mono=True)
             self._item_ol_vram.show()
+            parts = []
+            if ol_details:
+                layers = ol_details.get('layers', 0)
+                for v in (ol_details.get('arch'), f"{layers} layers" if layers else "", ol_details.get('params'), ol_details.get('quant')):
+                    if v: parts.append(v)
+                if layers > 0 and ol_api['vram_gb'] > 0:
+                    parts.append(f"≈{ol_api['vram_gb'] / layers:.2f} GB/layer")
+            if parts:
+                set_title(self._item_ol_arch, "  " + " · ".join(parts), font_size=11, sub=True)
+                self._item_ol_arch.show()
+            else: self._item_ol_arch.hide()
+            set_title(self._item_ol_gpu, f"  GPU  Renderer {gpu.get('renderer', 0)}%  Tiler {gpu.get('tiler', 0)}%  (시스템 전체)", font_size=11, sub=True)
+            self._item_ol_gpu.show()
         else:
             set_title(self._item_ol_model, "Ollama: 로드된 모델 없음", sub=True)
             self._item_ol_vram.hide()
+            self._item_ol_arch.hide()
+            self._item_ol_gpu.hide()
             self._item_ol_cpu.hide()
         if ol_api and ol_proc:
             set_title(self._item_ol_cpu, f"  CPU {ol_proc['total_cpu']:.1f}%   MEM {ol_proc['mem_mb']:.0f} MB", font_size=11, sub=True)
