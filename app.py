@@ -36,6 +36,9 @@ CPU_COLOR = (59, 153, 252)   # 파랑
 GPU_COLOR = (50, 215, 115)   # 초록
 BG_COLOR  = (0, 0, 0, 15)    # 거의 투명
 
+try: _GRAPH_FONT = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 20)
+except Exception: _GRAPH_FONT = ImageFont.load_default()
+
 # ── IOKit GPU Stats Setup ──────────────────────────────────────────
 iokit_path = ctypes.util.find_library("IOKit")
 iokit = ctypes.CDLL(iokit_path)
@@ -478,8 +481,7 @@ class HistoryGraph:
             pts = [(pad + int(gw * i / (HISTORY_LEN - 1)), h - pad - int(gh * min(val, 100) / 100)) for i, val in enumerate(list(hist))]
             if len(pts) >= 2: d.line(pts, fill=color + (220,), width=3)
         draw_line(self._gpu, GPU_COLOR); draw_line(self._cpu, CPU_COLOR)
-        try: font = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 20)
-        except Exception: font = ImageFont.load_default()
+        font = _GRAPH_FONT
         d.ellipse([pad, pad+2, pad+14, pad+16], fill=CPU_COLOR+(230,))
         d.text((pad+20, pad+1), "CPU", font=font, fill=CPU_COLOR+(230,))
         d.ellipse([pad+80, pad+2, pad+94, pad+16], fill=GPU_COLOR+(230,))
@@ -561,8 +563,23 @@ class MonitorApp(rumps.App):
         self._tracker, self._graph = OllamaProcessTracker(), HistoryGraph()
         self._top_tracker = TopProcessTracker()
         self._menu_open = False
+        self._menu_just_opened = False
+        self._wake = threading.Event()
         self._needs_update = False
         self._screen_off = threading.Event()
+
+        self._frame_images = []
+        for p in FRAME_PATHS:
+            try:
+                img = NSImage.alloc().initWithContentsOfFile_(p)
+                if img:
+                    orig = img.size()
+                    h = 16.0
+                    w = h * orig.width / orig.height
+                    img.setSize_(NSSize(w, h))
+                    img.setTemplate_(True)
+                    self._frame_images.append(img)
+            except Exception: pass
 
         self._graph_nsitem = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_("", None, "")
         self._graph_nsitem.setEnabled_(False)
@@ -593,7 +610,8 @@ class MonitorApp(rumps.App):
 
         self._setup_menu_observers()
         self._setup_power_observers()
-        self._start_timer(self._animate, 0.1)
+        self._start_timer(self._animate, 0.1, common=False)
+        self._start_timer(self._refresh_menu, 1.0, common=True)
         
         # Start background stats collection
         self._stats_thread = threading.Thread(target=self._stats_loop, daemon=True)
@@ -605,12 +623,30 @@ class MonitorApp(rumps.App):
         nc.addObserver_selector_name_object_(self, "_menu_will_open:", "NSMenuDidBeginTrackingNotification", None)
         nc.addObserver_selector_name_object_(self, "_menu_did_close:", "NSMenuDidEndTrackingNotification", None)
 
-    def _menu_will_open_(self, _):
-        self._menu_open = True
+    def _is_our_menu(self, notification):
+        try:
+            my_menu = self._nsapp.nsstatusitem.menu()
+            if notification is not None and my_menu is not None:
+                return notification.object() == my_menu
+        except Exception:
+            pass
+        return True
+
+    def _menu_will_open_(self, notification):
+        if not self._is_our_menu(notification):
+            return
+        with self._lock:
+            self._menu_open = True
+            self._menu_just_opened = True
+        self._wake.set()
+        self._insert_graph()
         self._update_ui()
 
-    def _menu_did_close_(self, _):
-        self._menu_open = False
+    def _menu_did_close_(self, notification):
+        if not self._is_our_menu(notification):
+            return
+        with self._lock:
+            self._menu_open = False
 
     def _setup_power_observers(self):
         from AppKit import NSWorkspace
@@ -632,29 +668,26 @@ class MonitorApp(rumps.App):
     def _did_wake_(self, _):
         self._screen_off.clear()
 
-    def _start_timer(self, callback, interval):
+    def _start_timer(self, callback, interval, common=False):
         t = rumps.Timer(callback, interval)
         t.start()
-        NSRunLoop.currentRunLoop().addTimer_forMode_(t._nstimer, NSRunLoopCommonModes)
+        if common:
+            NSRunLoop.currentRunLoop().addTimer_forMode_(t._nstimer, NSRunLoopCommonModes)
+        return t
 
-    def _set_icon(self, path):
+    def _set_icon(self, img):
         try:
-            img = NSImage.alloc().initWithContentsOfFile_(path)
             if img:
-                orig = img.size()
-                h = 16.0
-                w = h * orig.width / orig.height
-                img.setSize_(NSSize(w, h))
-                img.setTemplate_(True)
                 self._nsapp.nsstatusitem.setImage_(img)
         except Exception: pass
 
     def _animate(self, timer):
+        if self._menu_open:
+            return
+
         if self._screen_off.is_set():
             if abs(timer.interval - SCREEN_OFF_ANIMATION_INTERVAL) > 0.001:
                 timer.interval = SCREEN_OFF_ANIMATION_INTERVAL
-                try: NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSRunLoopCommonModes)
-                except Exception: pass
             return
 
         with self._lock:
@@ -666,17 +699,15 @@ class MonitorApp(rumps.App):
 
         if abs(timer.interval - new_interval) > 0.001:
             timer.interval = new_interval
-            try: NSRunLoop.currentRunLoop().addTimer_forMode_(timer._nstimer, NSRunLoopCommonModes)
-            except Exception: pass
 
-        self._frame = (self._frame + 1) % len(FRAME_PATHS)
-        self._set_icon(FRAME_PATHS[self._frame])
+        if self._frame_images:
+            self._frame = (self._frame + 1) % len(self._frame_images)
+            self._set_icon(self._frame_images[self._frame])
 
-        if self._menu_open:
-            self._insert_graph()
-            if self._needs_update:
-                self._update_ui()
-                self._needs_update = False
+    def _refresh_menu(self, timer):
+        if self._menu_open and self._needs_update:
+            self._update_ui()
+            self._needs_update = False
 
     def _insert_graph(self):
         if self._graph_inserted: return
@@ -691,65 +722,112 @@ class MonitorApp(rumps.App):
     def _stats_loop(self):
         """Background thread for data collection."""
         counter = 0
+        close_counter = 0
+        need_top_collect = False
         while True:
             with self._lock:
+                menu_open = self._menu_open
                 plugged = self._bat["plugged"] if self._bat else True
-            
+                just_opened = self._menu_just_opened
+                if just_opened:
+                    self._menu_just_opened = False
+
             # Adaptive interval
             if self._screen_off.is_set():
                 interval = SCREEN_OFF_STATS_INTERVAL
             else:
                 interval = 2.0 if not plugged else 1.0
-            
-            # 1. High frequency stats
-            cpu = psutil.cpu_percent(interval=None)
-            mem = psutil.virtual_memory().percent
-            gpu = get_gpu_stats()
-            net = get_network_stats()
-            self._tracker.update()
-            ol_proc = self._tracker.stats()
-            
-            # 2. Medium frequency stats (every 3s or 6s)
-            bat, ol_api, thermal, fan, top = None, None, None, None, None
-            ol_details = None
-            ollama_freq = 3 if plugged else 6
-            _ollama_checked = False
-            if counter % ollama_freq == 0:
-                bat = get_battery_stats()
-                ol_api = get_ollama_api_info()
-                thermal = get_thermal_stats()
-                fan = get_fan_stats()
-                self._top_tracker.update()
-                top = self._top_tracker.stats()
-                _ollama_checked = True
-                if ol_api:
-                    key = ol_api["model"]
-                    if key not in self._ol_details_cache:
-                        if len(self._ol_details_cache) >= 8: self._ol_details_cache.clear()
-                        self._ol_details_cache[key] = get_ollama_model_details(key) or {}
-                    ol_details = self._ol_details_cache[key] or None
-            
-            # 3. Low frequency stats (every 30s)
-            disk = None
-            if counter % 30 == 0:
-                disk = get_disk_stats()
-            
-            with self._lock:
-                self._cpu, self._mem, self._gpu, self._net = cpu, mem, gpu, net
-                self._ollama_proc = ol_proc
-                if bat is not None: self._bat = bat
-                if _ollama_checked:
-                    self._ollama_api = ol_api
-                    self._ol_details = ol_details
-                if top is not None: self._top = top
-                if thermal is not None: self._thermal = thermal
-                if fan is not None: self._fan = fan
-                if disk is not None: self._disk = disk
-                self._graph.push(cpu, gpu["device"])
-                self._needs_update = True
-            
-            counter += 1
-            time.sleep(interval)
+
+            if not menu_open:
+                need_top_collect = False
+                cpu = psutil.cpu_percent(interval=None)
+                gpu = get_gpu_stats()
+                if close_counter % 30 == 0:
+                    try:
+                        b = psutil.sensors_battery()
+                        if b is not None:
+                            with self._lock:
+                                if self._bat:
+                                    self._bat["pct"] = b.percent
+                                    self._bat["plugged"] = b.power_plugged
+                                else:
+                                    self._bat = {"pct": b.percent, "plugged": b.power_plugged, "remain": "--", "watts": 0}
+                    except Exception: pass
+                close_counter += 1
+
+                with self._lock:
+                    self._cpu = cpu
+                    self._gpu = gpu
+                    self._graph.push(cpu, gpu["device"])
+            else:
+                if just_opened:
+                    global _net_prev, _net_prev_time
+                    _net_prev, _net_prev_time = None, None
+
+                cpu = psutil.cpu_percent(interval=None)
+                mem = psutil.virtual_memory().percent
+                gpu = get_gpu_stats()
+                net = get_network_stats()
+
+                self._tracker.update()
+                if just_opened:
+                    self._tracker.stats()
+                    ol_proc = None
+                    ol_proc_checked = False
+                else:
+                    ol_proc = self._tracker.stats()
+                    ol_proc_checked = True
+
+                bat, ol_api, thermal, fan, top = None, None, None, None, None
+                ol_details = None
+                ollama_freq = 3 if plugged else 6
+                _ollama_checked = False
+
+                if just_opened or need_top_collect or (counter % ollama_freq == 0):
+                    bat = get_battery_stats()
+                    ol_api = get_ollama_api_info()
+                    thermal = get_thermal_stats()
+                    fan = get_fan_stats()
+                    self._top_tracker.update()
+                    _top_res = self._top_tracker.stats()
+
+                    if just_opened:
+                        top = None
+                        need_top_collect = True
+                    else:
+                        top = _top_res
+                        need_top_collect = False
+
+                    _ollama_checked = True
+                    if ol_api:
+                        key = ol_api["model"]
+                        if key not in self._ol_details_cache:
+                            if len(self._ol_details_cache) >= 8: self._ol_details_cache.clear()
+                            self._ol_details_cache[key] = get_ollama_model_details(key) or {}
+                        ol_details = self._ol_details_cache[key] or None
+
+                disk = None
+                if just_opened or (counter % 30 == 0):
+                    disk = get_disk_stats()
+
+                with self._lock:
+                    self._cpu, self._mem, self._gpu, self._net = cpu, mem, gpu, net
+                    if ol_proc_checked: self._ollama_proc = ol_proc
+                    if bat is not None: self._bat = bat
+                    if _ollama_checked:
+                        self._ollama_api = ol_api
+                        self._ol_details = ol_details
+                    if top is not None: self._top = top
+                    if thermal is not None: self._thermal = thermal
+                    if fan is not None: self._fan = fan
+                    if disk is not None: self._disk = disk
+                    self._graph.push(cpu, gpu["device"])
+                    self._needs_update = True
+
+                counter += 1
+
+            self._wake.wait(interval)
+            self._wake.clear()
 
     def _update_ui(self):
         """Update menu items and graph image. Should be called on main thread."""
