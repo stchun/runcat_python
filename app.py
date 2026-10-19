@@ -1,9 +1,7 @@
 import rumps
 import psutil
-import subprocess
 import urllib.request
 import json
-import re
 import struct as _struct
 import threading
 import time
@@ -61,6 +59,9 @@ cf.CFRelease.restype = None
 cf.CFRelease.argtypes = [ctypes.c_void_p]
 
 _key_perf_stats = cf.CFStringCreateWithCString(None, b"PerformanceStatistics", 0)
+
+iokit.IOPSCopyExternalPowerAdapterDetails.restype = ctypes.c_void_p
+iokit.IOPSCopyExternalPowerAdapterDetails.argtypes = []
 
 # ── SMC Fan Stats Setup ────────────────────────────────────────────
 iokit.IOServiceGetMatchingService.restype = ctypes.c_uint
@@ -154,27 +155,46 @@ def _smc_float(raw: bytes) -> float:
     """Apple Silicon SMC fan value: little-endian IEEE 754 float (flt , 4B)."""
     return _struct.unpack("<f", raw[:4])[0]
 
+_smc_conn = None
+
+def _smc_get_conn() -> int | None:
+    global _smc_conn
+    if _smc_conn is None:
+        _smc_conn = _smc_open()
+    return _smc_conn
+
+def _smc_close():
+    global _smc_conn
+    if _smc_conn is not None:
+        try: iokit.IOServiceClose(_smc_conn)
+        except Exception: pass
+        _smc_conn = None
+
 def get_fan_stats() -> list[dict]:
     """SMC에서 팬 RPM 읽기. 팬 없는 기기는 빈 리스트 반환."""
+    global _smc_conn
     try:
-        conn = _smc_open()
+        conn = _smc_get_conn()
         if conn is None:
             return []
-        try:
+        num_raw, _ = _smc_read_key(conn, "FNum")
+        if num_raw is None:
+            _smc_close()
+            conn = _smc_get_conn()
+            if conn is None:
+                return []
             num_raw, _ = _smc_read_key(conn, "FNum")
             if num_raw is None:
                 return []
-            num_fans = num_raw[0]
-            fans = []
-            for i in range(num_fans):
-                ac_raw, _ = _smc_read_key(conn, f"F{i}Ac")
-                mx_raw, _ = _smc_read_key(conn, f"F{i}Mx")
-                rpm     = _smc_float(ac_raw) if ac_raw and len(ac_raw) >= 4 else 0.0
-                max_rpm = _smc_float(mx_raw) if mx_raw and len(mx_raw) >= 4 else 6000.0
-                fans.append({"rpm": rpm, "max_rpm": max_rpm})
-            return fans
-        finally:
-            iokit.IOServiceClose(conn)
+        num_fans = num_raw[0]
+        fans = []
+        for i in range(num_fans):
+            ac_raw, _ = _smc_read_key(conn, f"F{i}Ac")
+            mx_raw, _ = _smc_read_key(conn, f"F{i}Mx")
+            rpm     = _smc_float(ac_raw) if ac_raw and len(ac_raw) >= 4 else 0.0
+            max_rpm = _smc_float(mx_raw) if mx_raw and len(mx_raw) >= 4 else 6000.0
+            fans.append({"rpm": rpm, "max_rpm": max_rpm})
+        return fans
     except Exception:
         return []
 
@@ -268,48 +288,49 @@ def get_gpu_stats():
     return stats
 
 
-def _diskutil_used_bytes(path):
-    try:
-        out = subprocess.run(["diskutil", "info", path], capture_output=True, text=True, timeout=3).stdout
-        m = re.search(r"Volume Used Space:\s+[\d.]+ \w+\s+\((\d+) Bytes\)", out)
-        if m: return int(m.group(1))
-    except Exception: pass
-    return 0
-
-
-def _diskutil_container_bytes(path):
-    try:
-        out = subprocess.run(["diskutil", "info", path], capture_output=True, text=True, timeout=3).stdout
-        total = re.search(r"Container Total Space:\s+[\d.]+ \w+\s+\((\d+) Bytes\)", out)
-        free  = re.search(r"Container Free Space:\s+[\d.]+ \w+\s+\((\d+) Bytes\)", out)
-        if total and free: return int(total.group(1)), int(free.group(1))
-    except Exception: pass
-    return 0, 0
-
-
 def get_disk_stats():
-    sys_used, data_used = _diskutil_used_bytes("/"), _diskutil_used_bytes("/System/Volumes/Data")
-    total_b, _ = _diskutil_container_bytes("/")
-    used_b = sys_used + data_used
-    total_gb, used_gb = total_b / 1e9, used_b / 1e9
-    pct = min(used_gb / total_gb * 100, 100) if total_gb > 0 else 0
-    return {"used_gb": used_gb, "total_gb": total_gb, "pct": pct}
+    try:
+        st = os.statvfs("/")
+        total_b = st.f_blocks * st.f_frsize
+        free_b = st.f_bavail * st.f_frsize
+        used_b = total_b - free_b
+        total_gb, used_gb = total_b / 1e9, used_b / 1e9
+        pct = min(used_gb / total_gb * 100, 100) if total_gb > 0 else 0
+        return {"used_gb": used_gb, "total_gb": total_gb, "pct": pct}
+    except Exception:
+        return {"used_gb": 0.0, "total_gb": 0.0, "pct": 0.0}
 
 
 def _get_charger_watts():
     try:
-        out = subprocess.run(["system_profiler", "SPPowerDataType"], capture_output=True, text=True, timeout=3).stdout
-        m = re.search(r"AC Charger Information:.*?Wattage \(W\):\s*(\d+)", out, re.S)
-        return int(m.group(1)) if m else 0
+        ptr = iokit.IOPSCopyExternalPowerAdapterDetails()
+        if not ptr:
+            return 0
+        try:
+            d = objc.objc_object(c_void_p=ptr)
+            return int(d.get("Watts", 0))
+        finally:
+            cf.CFRelease(ptr)
     except Exception:
         return 0
 
 
+_charger_cache = None
+
 def get_battery_stats():
+    global _charger_cache
     bat = psutil.sensors_battery()
     if bat is None: return None
     plugged, secs = bat.power_plugged, bat.secsleft
-    watts = _get_charger_watts() if plugged else 0
+    if not plugged:
+        watts = 0
+        _charger_cache = (False, 0)
+    else:
+        if _charger_cache is not None and _charger_cache[0] is True and _charger_cache[1] > 0:
+            watts = _charger_cache[1]
+        else:
+            watts = _get_charger_watts()
+            _charger_cache = (True, watts)
     if plugged: remain = f"충전 중: {watts}W" if watts > 0 else "충전 중"
     elif secs == psutil.POWER_TIME_UNLIMITED or secs < 0: remain = "--"
     else:
@@ -387,27 +408,34 @@ class OllamaProcessTracker:
         self._procs: dict[int, psutil.Process] = {}
         self._last_scan_time = 0
 
-    def update(self):
+    def reset(self):
+        self._procs.clear()
+        self._last_scan_time = 0
+
+    def update(self) -> bool:
         now = time.time()
+        has_new = False
         if now - self._last_scan_time > 5:
             self._last_scan_time = now
             current_pids = set()
-            for p in psutil.process_iter(['pid', 'cmdline']):
+            for p in psutil.process_iter(['pid', 'name']):
                 try:
-                    cmd = " ".join(p.info['cmdline'] or [])
-                    if 'ollama' not in cmd.lower(): continue
+                    name = (p.info['name'] or '').lower()
+                    if 'ollama' not in name: continue
                     pid = p.pid
                     current_pids.add(pid)
                     if pid not in self._procs:
                         proc = psutil.Process(pid)
                         proc.cpu_percent()
                         self._procs[pid] = proc
+                        has_new = True
                 except (psutil.NoSuchProcess, psutil.AccessDenied): pass
             for pid in list(self._procs):
                 if pid not in current_pids: del self._procs[pid]
         else:
             for pid in list(self._procs):
                 if not self._procs[pid].is_running(): del self._procs[pid]
+        return has_new
 
     def stats(self):
         best, best_mem, total_cpu = None, 0, 0.0
@@ -769,15 +797,6 @@ class MonitorApp(rumps.App):
                 gpu = get_gpu_stats()
                 net = get_network_stats()
 
-                self._tracker.update()
-                if just_opened:
-                    self._tracker.stats()
-                    ol_proc = None
-                    ol_proc_checked = False
-                else:
-                    ol_proc = self._tracker.stats()
-                    ol_proc_checked = True
-
                 bat, ol_api, thermal, fan, top = None, None, None, None, None
                 ol_details = None
                 ollama_freq = 3 if plugged else 6
@@ -806,8 +825,23 @@ class MonitorApp(rumps.App):
                             self._ol_details_cache[key] = get_ollama_model_details(key) or {}
                         ol_details = self._ol_details_cache[key] or None
 
+                current_ol_api = ol_api if _ollama_checked else self._ollama_api
+                if current_ol_api:
+                    new_proc = self._tracker.update()
+                    if just_opened or new_proc:
+                        self._tracker.stats()
+                        ol_proc = None
+                        ol_proc_checked = False
+                    else:
+                        ol_proc = self._tracker.stats()
+                        ol_proc_checked = True
+                else:
+                    self._tracker.reset()
+                    ol_proc = None
+                    ol_proc_checked = True
+
                 disk = None
-                if just_opened or (counter % 30 == 0):
+                if just_opened or (counter % 60 == 0):
                     disk = get_disk_stats()
 
                 with self._lock:
@@ -949,7 +983,9 @@ class MonitorApp(rumps.App):
         elif ol_api:
             self._item_ol_cpu.hide()
 
-    def quit_app(self, _): rumps.quit_application()
+    def quit_app(self, _):
+        _smc_close()
+        rumps.quit_application()
 
 if __name__ == "__main__":
     MonitorApp().run()
